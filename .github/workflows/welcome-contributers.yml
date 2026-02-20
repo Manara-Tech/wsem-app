@@ -1,0 +1,237 @@
+name:  Contributor Onboarding
+
+on:
+  pull_request_target:
+    types: [opened]
+
+  issues:
+    types: [opened]
+
+  repository_dispatch:
+    types: [member_added]
+
+env:
+  DISCORD_INVITE:      "https://discord.gg/MY_INVITE"
+  CONTRIBUTING_GUIDE:  "https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md"
+  CODE_OF_CONDUCT:     "https://github.com/${{ github.repository }}/blob/main/CODE_OF_CONDUCT.md"
+  CODING_STANDARDS:    "https://github.com/${{ github.repository }}/blob/main/docs/CODING_STANDARDS.md"
+  DOCS_URL:            "https://www.notion.so/manara/AWS-Ramadan-Challenge-2fc2d7c1418c8048b59ef5d3cbc389a1"
+
+jobs:
+
+  welcome-new-pr-author:
+    name: Welcome First-Time PR Author
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      pull-requests: write
+      issues: read
+
+    steps:
+      - name: Check if author is a first-time contributor
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'all',
+              per_page: 10,
+            });
+            const authorPRs = prs.filter(
+              pr => pr.user.login === context.payload.pull_request.user.login
+            );
+            core.setOutput('is_first_pr', authorPRs.length === 1 ? 'true' : 'false');
+
+      - name: Post first-time PR welcome comment
+        if: steps.check.outputs.is_first_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author  = context.payload.pull_request.user.login;
+            const prTitle = context.payload.pull_request.title;
+
+            const body = `
+            ## 🎉 Welcome, @${author}! Thank you for your first pull request!
+
+            We're thrilled to have you contribute to **${{ github.repository }}**.
+            Your PR — *"${prTitle}"* — is now in the review queue.
+
+            ---
+
+            ### 📚 Before your review, here are some helpful resources:
+
+            | Resource | Link |
+            |---|---|
+            | 📖 Contributing Guide | [${{ env.CONTRIBUTING_GUIDE }}](${{ env.CONTRIBUTING_GUIDE }}) |
+            | ✅ Coding Standards | [${{ env.CODING_STANDARDS }}](${{ env.CODING_STANDARDS }}) |
+            | 📜 Code of Conduct | [${{ env.CODE_OF_CONDUCT }}](${{ env.CODE_OF_CONDUCT }}) |
+            | 📄 Documentation | [${{ env.DOCS_URL }}](${{ env.DOCS_URL }}) |
+
+            ---
+
+            ### 💬 Join our community!
+
+            Connect with maintainers and fellow contributors on our
+            **[Discord Server](${{ env.DISCORD_INVITE }})** — great place to ask questions,
+            share ideas, or just say hi 👋
+
+            ---
+
+            A maintainer will review your PR soon. In the meantime, make sure:
+            - [ ] Tests pass locally
+            - [ ] Your branch is up-to-date with \`main\`
+            - [ ] The PR description explains *what* and *why*
+
+            We appreciate your contribution! 🚀
+            `;
+
+            await github.rest.issues.createComment({
+              owner:       context.repo.owner,
+              repo:        context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
+
+      - name: Label first-time contributor PR
+        if: steps.check.outputs.is_first_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Ensure the label exists before applying
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  'first-contribution',
+                color: '7057ff',
+                description: 'First PR from this contributor',
+              });
+            } catch (_) { /* label already exists */ }
+
+            await github.rest.issues.addLabels({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels:       ['first-contribution'],
+            });
+
+  welcome-new-issue-author:
+    name: Welcome First-Time Issue Author
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues'
+    permissions:
+      issues: write
+
+    steps:
+      - name: Check if author has filed issues before
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner:    context.repo.owner,
+              repo:     context.repo.repo,
+              creator:  context.payload.issue.user.login,
+              state:    'all',
+              per_page: 10,
+            });
+            // Filter out PRs (GitHub API returns PRs in issues list)
+            const realIssues = issues.filter(i => !i.pull_request);
+            core.setOutput('is_first_issue', realIssues.length === 1 ? 'true' : 'false');
+
+      - name: Post first-time issue welcome comment
+        if: steps.check.outputs.is_first_issue == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author = context.payload.issue.user.login;
+
+            const body = `
+            ## 👋 Welcome, @${author}!
+
+            Thanks for opening your first issue in **${{ github.repository }}**!
+            We value every bug report, feature request, and question — it helps us improve.
+
+            ---
+
+            ### 🔍 While you wait for a response, you might find these helpful:
+
+            - 📖 [Contributing Guide](${{ env.CONTRIBUTING_GUIDE }}) — how to get involved
+            - 📄 [Documentation](${{ env.DOCS_URL }}) — answers to common questions
+            - 🏷️ [Good First Issues](${{ env.GOOD_FIRST_ISSUES }}) — if you'd like to contribute code too!
+
+            ---
+
+            ### 💬 Join our community on [Discord](${{ env.DISCORD_INVITE }})!
+
+            A maintainer will get back to you soon. If this is a bug,
+            feel free to add any additional context (logs, screenshots, environment info)
+            in the comments below. It speeds up the process a lot!
+
+            Thanks again for being here 🙌
+            `;
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body,
+            });
+
+  welcome-new-org-member:
+    name: Welcome New Org Member
+    runs-on: ubuntu-latest
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'member_added'
+    permissions:
+      issues: write  
+
+    steps:
+      - name: Extract member info from dispatch payload
+        id: member
+        run: |
+          echo "login=${{ github.event.client_payload.member_login }}" >> "$GITHUB_OUTPUT"
+          echo "org=${{ github.event.client_payload.organization }}"   >> "$GITHUB_OUTPUT"
+
+      - name: Create a personalized welcome issue for the new member
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const newMember = '${{ steps.member.outputs.login }}';
+            const org       = '${{ steps.member.outputs.org }}';
+
+            const body = `
+            # 🎉 Welcome to the team, @${newMember}!
+
+            We're so excited to have you as a member of **${org}**!
+
+            ---
+
+            ### 🗺️ Your onboarding checklist
+
+            - [ ] Read the [Contributing Guide](${{ env.CONTRIBUTING_GUIDE }})
+            - [ ] Review our [Coding Standards](${{ env.CODING_STANDARDS }})
+            - [ ] Check out our [Code of Conduct](${{ env.CODE_OF_CONDUCT }})
+            - [ ] Explore the [Documentation](${{ env.DOCS_URL }})
+            - [ ] Join our [Discord community](${{ env.DISCORD_INVITE }}) and say hi 👋
+            - [ ] Pick up a [Good First Issue](${{ env.GOOD_FIRST_ISSUES }}) if you're ready to dive in!
+
+            ---
+
+            ### 📬 Who to reach out to
+
+            If you have questions about the codebase, processes, or anything else,
+            drop a message in **#general** on Discord or tag a maintainer in any issue or PR.
+
+            We're glad you're here. Let's build something great together! 🚀
+            `;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `👋 Welcome to the team, ${newMember}!`,
+              body,
+              labels: ['onboarding', 'welcome'],
+              assignees: [newMember],
+            });
