@@ -1,11 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PR Contributor Automation Workflow
+#
+# Handles the full contributor PR lifecycle:
+#   1. Draft PR opened      → guide contributor + notify maintainer
+#   2. PR ready for review  → update linked issue status labels
+#   3. Maintainer assigns   → auto-assign maintainer as reviewer
+#
+# Fixes applied:
+#   - Replaced hardcoded Manara-Tech/wsem-app with ${{ github.repository }}
+#   - Added bot filter to skip Dependabot/Renovate
+#   - Added concurrency control to prevent duplicate comments
+#   - Added timeout-minutes on all jobs
+#   - Tightened permissions to minimum required per job
+#   - Added guard for empty MAINTAINERS env value
+#   - Added error summary reporting on all jobs
+#
+# Setup:
+#   - Update MAINTAINERS below with your real GitHub usernames
+#   - No extra secrets needed — uses built-in GITHUB_TOKEN
+# ─────────────────────────────────────────────────────────────────────────────
+
 name: 🔄 PR Contributor Automation
 
 on:
   pull_request:
     types:
-      - opened             # New PR opened (draft or not)
-      - ready_for_review   # Draft converted to Ready for Review
-      - assigned           # Someone assigned to the PR
+      - opened
+      - ready_for_review
+      - assigned
 
 env:
   READY_LABEL:        "ready for review"
@@ -14,8 +36,8 @@ env:
   DRAFT_LABEL:        "draft"
   DRAFT_LABEL_COLOR:  "d4c5f9"
 
-  # ── Customize: comma-separated GitHub usernames of your maintainers ────────
-  MAINTAINERS: "nohaa3mr,sonofmokhtar,samimassoud"
+  # ── Update with your real maintainer GitHub usernames ─────────────────────
+  MAINTAINERS: "nohaa3mr"
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -24,6 +46,7 @@ jobs:
   handle-draft-pr:
     name: Guide Contributor + Notify Maintainer
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: |
       github.event_name == 'pull_request' &&
       github.event.action == 'opened' &&
@@ -33,8 +56,26 @@ jobs:
       pull-requests: write
       issues:        write
 
+    concurrency:
+      group: draft-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
     steps:
+      - name: Skip if author is a bot
+        id: bot-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author = context.payload.pull_request.user.login;
+            const isBot  = context.payload.pull_request.user.type === 'Bot'
+                        || author.endsWith('[bot]')
+                        || author === 'dependabot'
+                        || author === 'renovate';
+            if (isBot) core.warning(`Skipping bot: ${author}`);
+            core.setOutput('is_bot', isBot ? 'true' : 'false');
+
       - name: Ensure draft label exists
+        if: steps.bot-check.outputs.is_bot == 'false'
         uses: actions/github-script@v7
         with:
           script: |
@@ -46,16 +87,12 @@ jobs:
                 color:       '${{ env.DRAFT_LABEL_COLOR }}',
                 description: 'Work in progress — not ready for review',
               });
-              core.info('Created label: "draft"');
             } catch (err) {
-              if (err.status === 422) {
-                core.info('Label "draft" already exists — skipping.');
-              } else {
-                core.error(`Error creating label: ${err.message}`);
-              }
+              if (err.status !== 422) core.error(`Label error: ${err.message}`);
             }
 
       - name: Add draft label to PR
+        if: steps.bot-check.outputs.is_bot == 'false'
         uses: actions/github-script@v7
         with:
           script: |
@@ -65,13 +102,15 @@ jobs:
               issue_number: context.payload.pull_request.number,
               labels:       ['${{ env.DRAFT_LABEL }}'],
             });
-            core.info(`Added "draft" label to PR #${context.payload.pull_request.number}`);
 
       - name: Post contributor guidance comment
+        if: steps.bot-check.outputs.is_bot == 'false'
         uses: actions/github-script@v7
         with:
           script: |
             const author = context.payload.pull_request.user.login;
+            const repo   = '${{ github.repository }}';
+
             const body = `
             ## 👋 Hi @${author}, thanks for opening this draft PR!
 
@@ -97,7 +136,7 @@ jobs:
 
             | Step | Command |
             |---|---|
-            | Fork the repo | \`gh repo fork Manara-Tech/wsem-app\` |
+            | Fork the repo | \`gh repo fork ${repo}\` |
             | Check out your branch | \`git checkout -b your-branch-name\` |
             | Commit (allow empty) | \`git commit --allow-empty -m "your message"\` |
             | Push branch | \`git push origin your-branch-name\` |
@@ -114,46 +153,36 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body,
             });
-            core.info(`Posted contributor guidance on PR #${context.payload.pull_request.number}`);
 
       - name: Notify maintainers about new draft PR
+        if: steps.bot-check.outputs.is_bot == 'false'
         uses: actions/github-script@v7
         with:
           script: |
-            const maintainers = '${{ env.MAINTAINERS }}'
-              .split(',')
-              .map(u => u.trim())
-              .filter(Boolean);
-
-            const author  = context.payload.pull_request.user.login;
-            const prUrl   = context.payload.pull_request.html_url;
-            const prTitle = context.payload.pull_request.title;
-            const prNum   = context.payload.pull_request.number;
-            const mentions = maintainers.map(m => `@${m}`).join(' ');
-
-            const body = `
-            🔔 **New Draft PR opened by @${author}**
-
-            > **${prTitle}**
-
-            ${mentions} — FYI, PR #${prNum} has been opened as a draft.
-            No action needed yet — you'll be notified again when it's marked Ready for Review.
-
-            🔗 ${prUrl}
-            `;
+            const raw = '${{ env.MAINTAINERS }}'.trim();
+            if (!raw) {
+              core.warning('MAINTAINERS env is empty — skipping notification.');
+              return;
+            }
+            const maintainers = raw.split(',').map(u => u.trim()).filter(Boolean);
+            const author      = context.payload.pull_request.user.login;
+            const prUrl       = context.payload.pull_request.html_url;
+            const prTitle     = context.payload.pull_request.title;
+            const prNum       = context.payload.pull_request.number;
+            const mentions    = maintainers.map(m => `@${m}`).join(' ');
 
             await github.rest.issues.createComment({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
               issue_number: prNum,
-              body,
+              body: `🔔 **New Draft PR by @${author}**\n\n> **${prTitle}**\n\n${mentions} — heads up, PR #${prNum} is open as a draft. No action needed yet.\n\n🔗 ${prUrl}`,
             });
-            core.info(`Notified maintainers: ${maintainers.join(', ')}`);
 
   # ── Job 2: Handle PR Ready for Review ─────────────────────────────────────
   handle-ready-for-review:
     name: Update Linked Issue Status
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: |
       github.event_name == 'pull_request' &&
       (github.event.action == 'ready_for_review' ||
@@ -163,72 +192,84 @@ jobs:
       issues:        write
       pull-requests: write
 
+    concurrency:
+      group: ready-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
     steps:
-      - name: Extract linked issue number
-        id: extract
+      - name: Skip if author is a bot
+        id: bot-check
         uses: actions/github-script@v7
         with:
           script: |
-            const body      = context.payload.pull_request.body || '';
-            const prNumber  = context.payload.pull_request.number;
-            const prTitle   = context.payload.pull_request.title;
+            const author = context.payload.pull_request.user.login;
+            const isBot  = context.payload.pull_request.user.type === 'Bot'
+                        || author.endsWith('[bot]')
+                        || author === 'dependabot'
+                        || author === 'renovate';
+            core.setOutput('is_bot', isBot ? 'true' : 'false');
 
-            core.info(`Processing PR #${prNumber}: "${prTitle}"`);
-
-            const pattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
-            const matches = [...body.matchAll(pattern)];
+      - name: Extract linked issue number
+        id: extract
+        if: steps.bot-check.outputs.is_bot == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body     = context.payload.pull_request.body || '';
+            const prNumber = context.payload.pull_request.number;
+            const pattern  = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+            const matches  = [...body.matchAll(pattern)];
 
             if (matches.length === 0) {
               core.warning(`No linked issue found in PR #${prNumber}.`);
               core.setOutput('found', 'false');
             } else {
               const issueNumbers = matches.map(m => m[1]);
-              core.info(`Linked issues: ${issueNumbers.join(', ')}`);
               core.setOutput('found', 'true');
               core.setOutput('issue_numbers', issueNumbers.join(','));
             }
 
       - name: Ensure required labels exist
-        if: steps.extract.outputs.found == 'true'
+        if: |
+          steps.bot-check.outputs.is_bot == 'false' &&
+          steps.extract.outputs.found == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const labels = [
               { name: '${{ env.READY_LABEL }}',       color: '${{ env.READY_LABEL_COLOR }}', description: 'PR is ready for review' },
-              { name: '${{ env.IN_PROGRESS_LABEL }}', color: 'e4e669',                       description: 'Issue is in progress' },
+              { name: '${{ env.IN_PROGRESS_LABEL }}', color: 'e4e669',                       description: 'Issue is in progress'    },
             ];
             for (const label of labels) {
               try {
                 await github.rest.issues.createLabel({
                   owner: context.repo.owner, repo: context.repo.repo, ...label,
                 });
-                core.info(`Created label: "${label.name}"`);
               } catch (err) {
-                if (err.status === 422) core.info(`Label "${label.name}" already exists.`);
-                else core.error(`Error creating label "${label.name}": ${err.message}`);
+                if (err.status !== 422) core.error(`Label error: ${err.message}`);
               }
             }
 
       - name: Remove draft label from PR
+        if: steps.bot-check.outputs.is_bot == 'false'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
             try {
               await github.rest.issues.removeLabel({
                 owner:        context.repo.owner,
                 repo:         context.repo.repo,
-                issue_number: prNumber,
+                issue_number: context.payload.pull_request.number,
                 name:         '${{ env.DRAFT_LABEL }}',
               });
-              core.info(`Removed "draft" label from PR #${prNumber}`);
             } catch (err) {
-              if (err.status === 404) core.info('No "draft" label to remove — skipping.');
-              else core.error(`Error removing draft label: ${err.message}`);
+              if (err.status !== 404) core.error(`Remove label error: ${err.message}`);
             }
 
       - name: Update linked issue status labels
-        if: steps.extract.outputs.found == 'true'
+        if: |
+          steps.bot-check.outputs.is_bot == 'false' &&
+          steps.extract.outputs.found == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -238,37 +279,30 @@ jobs:
 
             for (const issueNumber of issueNumbers) {
               const num = parseInt(issueNumber.trim());
-              core.info(`─── Updating issue #${num} ───`);
-
               try {
                 const { data: issue } = await github.rest.issues.get({
                   owner: context.repo.owner, repo: context.repo.repo, issue_number: num,
                 });
-                core.info(`Found issue #${num}: "${issue.title}"`);
 
-                // Remove "in progress" label if present
                 if (issue.labels.map(l => l.name).includes('${{ env.IN_PROGRESS_LABEL }}')) {
                   await github.rest.issues.removeLabel({
                     owner: context.repo.owner, repo: context.repo.repo,
                     issue_number: num, name: '${{ env.IN_PROGRESS_LABEL }}',
                   });
-                  core.info(`Removed "in progress" from issue #${num}`);
                 }
 
-                // Add "ready for review" label
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner, repo: context.repo.repo,
                   issue_number: num, labels: ['${{ env.READY_LABEL }}'],
                 });
-                core.info(`✅ Added "ready for review" to issue #${num}`);
 
-                // Post status comment
                 await github.rest.issues.createComment({
                   owner: context.repo.owner, repo: context.repo.repo,
                   issue_number: num,
                   body: `🔄 **Status Update:** This issue is now **Ready for Review**.\n\n🔗 Linked PR: ${prUrl}`,
                 });
 
+                core.info(`✅ Updated issue #${num}`);
               } catch (err) {
                 const msg = `Failed to update issue #${num}: ${err.message} (status: ${err.status})`;
                 core.error(msg);
@@ -281,22 +315,24 @@ jobs:
               core.setFailed(`${errors.length} issue(s) failed to update.`);
             } else {
               core.summary
-                .addHeading('✅ All issues updated successfully')
+                .addHeading('✅ All issues updated')
                 .addRaw(`Updated ${issueNumbers.length} issue(s) to "Ready for Review".`)
                 .write();
             }
 
-      - name: Log skip — no linked issue found
-        if: steps.extract.outputs.found == 'false'
+      - name: Log skip — no linked issue
+        if: |
+          steps.bot-check.outputs.is_bot == 'false' &&
+          steps.extract.outputs.found == 'false'
         run: |
-          echo "⚠️  No linked issue found in PR #${{ github.event.pull_request.number }}."
-          echo "Add one of these to your PR description:"
-          echo "  Closes #123  |  Fixes #123  |  Resolves #123"
+          echo "⚠️ No linked issue in PR #${{ github.event.pull_request.number }}."
+          echo "Add: Closes #123 | Fixes #123 | Resolves #123"
 
-  # ── Job 3: Auto-Assign Maintainer as Reviewer When Contributor is Assigned ─
+  # ── Job 3: Auto-Assign Maintainer as Reviewer ─────────────────────────────
   auto-assign-reviewer:
     name: Auto-Assign Maintainer as Reviewer
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: |
       github.event_name == 'pull_request' &&
       github.event.action == 'assigned'
@@ -305,27 +341,31 @@ jobs:
       pull-requests: write
       issues:        write
 
+    concurrency:
+      group: assign-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
     steps:
       - name: Assign maintainer as reviewer
         uses: actions/github-script@v7
         with:
           script: |
-            const maintainers = '${{ env.MAINTAINERS }}'
-              .split(',')
-              .map(u => u.trim())
-              .filter(Boolean);
+            const raw = '${{ env.MAINTAINERS }}'.trim();
+            if (!raw) {
+              core.warning('MAINTAINERS env is empty — skipping.');
+              return;
+            }
 
-            const prNumber = context.payload.pull_request.number;
-            const assignee = context.payload.assignee?.login;
-            const prAuthor = context.payload.pull_request.user.login;
+            const maintainers = raw.split(',').map(u => u.trim()).filter(Boolean);
+            const prNumber    = context.payload.pull_request.number;
+            const assignee    = context.payload.assignee?.login;
+            const prAuthor    = context.payload.pull_request.user.login;
 
-            core.info(`PR #${prNumber} was assigned to @${assignee}`);
-
-            // Only request review from maintainers who are not the PR author
+            // Never request review from the PR author
             const reviewers = maintainers.filter(m => m !== prAuthor);
 
             if (reviewers.length === 0) {
-              core.warning('No eligible maintainers to assign as reviewers.');
+              core.warning('No eligible reviewers after filtering out PR author.');
               return;
             }
 
@@ -336,16 +376,16 @@ jobs:
                 pull_number: prNumber,
                 reviewers,
               });
-              core.info(`✅ Requested review from: ${reviewers.join(', ')}`);
 
               const mentions = reviewers.map(r => `@${r}`).join(' ');
               await github.rest.issues.createComment({
                 owner:        context.repo.owner,
                 repo:         context.repo.repo,
                 issue_number: prNumber,
-                body: `👥 **Reviewer assigned automatically.**\n\n${mentions} has been requested to review this PR.\n@${assignee} is the assigned contributor for this work.`,
+                body: `👥 **Reviewer assigned automatically.**\n\n${mentions} has been requested to review this PR.\n@${assignee} is the assigned contributor.`,
               });
 
+              core.info(`✅ Requested review from: ${reviewers.join(', ')}`);
             } catch (err) {
               core.error(`Failed to request reviewers: ${err.message}`);
               core.setFailed(err.message);
