@@ -15,7 +15,7 @@ env:
   DRAFT_LABEL_COLOR:  "d4c5f9"
 
   # ── Customize: comma-separated GitHub usernames of your maintainers ────────
-  MAINTAINERS: "nohaa3mr,sonofmokhtar,samimassoud"
+  MAINTAINERS: "nohaa3mr"
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
