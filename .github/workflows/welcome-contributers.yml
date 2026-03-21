@@ -131,7 +131,7 @@ jobs:
             ### 💬 Join our community!
 
             Connect with maintainers and fellow contributors on our
-            **[Discord Server](https://discord.gg/eKtsXhYp)** — great place to ask questions,
+            **[Discord Server](${{ env.DISCORD_INVITE }})** — great place to ask questions,
             share ideas, or just say hi 👋
 
             ---
@@ -285,6 +285,9 @@ jobs:
     name: Welcome New Org Member
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: org-member-${{ github.event.client_payload.member_login }}
+      cancel-in-progress: false
     if: github.event_name == 'repository_dispatch' && github.event.action == 'member_added'
 
     permissions:
