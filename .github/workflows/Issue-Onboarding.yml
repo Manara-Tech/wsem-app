@@ -1,0 +1,394 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Contributor Onboarding — Issue Assignment Workflow
+#
+# Triggers when a contributor is assigned to an issue they previously
+# commented on expressing interest.
+#
+# Flow:
+#   1. Issue assigned → check if assignee commented with interest phrase
+#   2. If yes → fetch their GitHub public email
+#   3. If email found → send formatted onboarding email via Gmail
+#   4. If no email → post onboarding steps as issue comment (fallback)
+#   5. Always → post a confirmation comment on the issue
+#
+# Required Secrets (add in repo Settings → Secrets → Actions):
+#   GMAIL_USER     → your Gmail address (e.g. team@gmail.com)
+#   GMAIL_PASSWORD → Gmail App Password (NOT your Gmail login password)
+#                    Generate at: myaccount.google.com/apppasswords
+#
+# Setup note:
+#   Gmail requires an "App Password" — not your regular password.
+#   Enable 2FA on your Google account first, then generate an App Password.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: 📬 Contributor Issue Onboarding
+
+on:
+  issues:
+    types: [assigned]
+
+env:
+  # ── Interest phrases — contributor must have used one of these ─────────────
+  INTEREST_PHRASES: "i'd like to,i want to,can i work on,interested in,assign me,i'll take this"
+
+  # ── Repo info ──────────────────────────────────────────────────────────────
+  REPO_URL:          "https://github.com/${{ github.repository }}"
+  CONTRIBUTING_GUIDE: "https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  onboard-assigned-contributor:
+    name: Onboard Assigned Contributor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: onboard-${{ github.event.issue.number }}-${{ github.event.assignee.login }}
+      cancel-in-progress: false
+
+    permissions:
+      issues: write
+
+    # Only fire when an issue (not PR) is assigned
+    if: github.event.issue.pull_request == null
+
+    steps:
+      # ── Step 1: Check assignee expressed interest in a comment ─────────────
+      - name: Check for interest comment
+        id: interest
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assignee     = context.payload.assignee.login;
+            const issueNumber  = context.payload.issue.number;
+            const phrases      = '${{ env.INTEREST_PHRASES }}'.split(',').map(p => p.trim().toLowerCase());
+
+            core.info(`Checking if @${assignee} expressed interest in issue #${issueNumber}`);
+
+            // Fetch all comments on the issue
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: issueNumber,
+              per_page:     100,
+            });
+
+            // Filter comments by the assignee
+            const assigneeComments = comments.filter(c => c.user.login === assignee);
+
+            if (assigneeComments.length === 0) {
+              core.warning(`@${assignee} has no comments on issue #${issueNumber} — skipping.`);
+              core.setOutput('expressed_interest', 'false');
+              return;
+            }
+
+            // Check if any comment contains an interest phrase
+            const matched = assigneeComments.find(c => {
+              const body = c.body.toLowerCase();
+              return phrases.some(phrase => body.includes(phrase));
+            });
+
+            if (matched) {
+              core.info(`✅ Found interest comment: "${matched.body.slice(0, 80)}..."`);
+              core.setOutput('expressed_interest', 'true');
+              core.setOutput('matched_comment',    matched.body.slice(0, 100));
+            } else {
+              core.warning(`No interest phrase found in @${assignee}'s comments — skipping.`);
+              core.setOutput('expressed_interest', 'false');
+            }
+
+      # ── Step 2: Fetch assignee's public GitHub email ───────────────────────
+      - name: Fetch contributor email
+        id: email
+        if: steps.interest.outputs.expressed_interest == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assignee = context.payload.assignee.login;
+
+            const { data: user } = await github.rest.users.getByUsername({
+              username: assignee,
+            });
+
+            if (user.email) {
+              core.info(`Found public email for @${assignee}: ${user.email}`);
+              core.setOutput('email_found', 'true');
+              core.setOutput('email',       user.email);
+              core.setOutput('name',        user.name || assignee);
+            } else {
+              core.warning(`@${assignee} has no public email — will use issue comment fallback.`);
+              core.setOutput('email_found', 'false');
+              core.setOutput('name',        user.name || assignee);
+            }
+
+      # ── Step 3a: Send onboarding email via Gmail ───────────────────────────
+      - name: Send onboarding email
+        if: |
+          steps.interest.outputs.expressed_interest == 'true' &&
+          steps.email.outputs.email_found == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port:    465
+          secure:         true
+          username:       ${{ secrets.GMAIL_USER }}
+          password:       ${{ secrets.GMAIL_PASSWORD }}
+          to:             ${{ steps.email.outputs.email }}
+          from:           "Manara-Tech Contributions <${{ secrets.GMAIL_USER }}>"
+          subject:        "🎉 You've been assigned to Issue #${{ github.event.issue.number }} — Here's how to get started"
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <style>
+                body        { font-family: Arial, sans-serif; color: #1a1a2e; background: #f4f7fb; margin: 0; padding: 0; }
+                .container  { max-width: 640px; margin: 40px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+                .header     { background: #2E5EA8; padding: 32px 40px; }
+                .header h1  { color: #ffffff; margin: 0; font-size: 22px; }
+                .header p   { color: #c8d8f0; margin: 8px 0 0; font-size: 14px; }
+                .body       { padding: 32px 40px; }
+                .intro      { font-size: 15px; line-height: 1.6; margin-bottom: 24px; }
+                .issue-box  { background: #EBF2FB; border-left: 4px solid #2E5EA8; border-radius: 4px; padding: 16px 20px; margin-bottom: 28px; }
+                .issue-box h3 { margin: 0 0 4px; color: #2E5EA8; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+                .issue-box p  { margin: 0; font-size: 15px; font-weight: bold; }
+                h2          { color: #2E5EA8; font-size: 16px; margin: 28px 0 12px; border-bottom: 2px solid #EBF2FB; padding-bottom: 8px; }
+                .step       { display: flex; margin-bottom: 16px; align-items: flex-start; }
+                .step-num   { background: #2E5EA8; color: white; border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 13px; flex-shrink: 0; margin-right: 14px; margin-top: 2px; }
+                .step-body  { flex: 1; }
+                .step-body strong { display: block; margin-bottom: 4px; font-size: 14px; }
+                .step-body p      { margin: 0; font-size: 13px; color: #555; line-height: 1.5; }
+                code        { background: #f0f4f8; border: 1px solid #d0dce8; border-radius: 3px; padding: 2px 6px; font-family: monospace; font-size: 13px; color: #c0392b; }
+                .code-block { background: #1a1a2e; border-radius: 6px; padding: 16px 20px; margin: 8px 0; }
+                .code-block code { background: none; border: none; color: #a8d8a8; font-size: 13px; display: block; line-height: 1.8; padding: 0; }
+                .note       { background: #fffbea; border: 1px solid #f0d060; border-radius: 4px; padding: 12px 16px; font-size: 13px; color: #7a6000; margin-top: 24px; }
+                .cta        { text-align: center; margin: 32px 0 8px; }
+                .btn        { background: #2E5EA8; color: white; padding: 12px 28px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; }
+                .footer     { background: #f4f7fb; padding: 20px 40px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #e0e8f0; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+
+                <div class="header">
+                  <h1>🎉 You're officially assigned!</h1>
+                  <p>Here are your standardized contribution steps to get started.</p>
+                </div>
+
+                <div class="body">
+
+                  <p class="intro">
+                    Hi <strong>${{ steps.email.outputs.name }}</strong>, you've been assigned to an issue in
+                    <strong>${{ github.repository }}</strong>. Follow the steps below to make your contribution
+                    clean, consistent, and ready for review.
+                  </p>
+
+                  <div class="issue-box">
+                    <h3>Assigned Issue</h3>
+                    <p>#${{ github.event.issue.number }} — ${{ github.event.issue.title }}</p>
+                  </div>
+
+                  <h2>📋 Contribution Steps</h2>
+
+                  <!-- Step 1 -->
+                  <div class="step">
+                    <div class="step-num">1</div>
+                    <div class="step-body">
+                      <strong>Fork the repository</strong>
+                      <p>Create your personal copy of the repo on GitHub.</p>
+                      <div class="code-block">
+                        <code>gh repo fork ${{ github.repository }} --clone</code>
+                        <code>cd wsem-app</code>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Step 2 -->
+                  <div class="step">
+                    <div class="step-num">2</div>
+                    <div class="step-body">
+                      <strong>Create a branch following the <code>feature/**</code> convention</strong>
+                      <p>Branch names must start with <code>feature/</code> and reference the issue number.</p>
+                      <div class="code-block">
+                        <code>git checkout -b feature/issue-${{ github.event.issue.number }}-short-description</code>
+                      </div>
+                      <p style="margin-top:6px;">Example: <code>feature/issue-${{ github.event.issue.number }}-fix-login-button</code></p>
+                    </div>
+                  </div>
+
+                  <!-- Step 3 -->
+                  <div class="step">
+                    <div class="step-num">3</div>
+                    <div class="step-body">
+                      <strong>Create an initial empty commit referencing the issue</strong>
+                      <p>This links your work to the issue from the very first commit.</p>
+                      <div class="code-block">
+                        <code>git commit --allow-empty -m "feat: start work on #${{ github.event.issue.number }} - ${{ github.event.issue.title }}"</code>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Step 4 -->
+                  <div class="step">
+                    <div class="step-num">4</div>
+                    <div class="step-body">
+                      <strong>Push your branch</strong>
+                      <div class="code-block">
+                        <code>git push origin feature/issue-${{ github.event.issue.number }}-short-description</code>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Step 5 -->
+                  <div class="step">
+                    <div class="step-num">5</div>
+                    <div class="step-body">
+                      <strong>Open a Draft PR with proper issue linking</strong>
+                      <p>Use one of these keywords in your PR description to link the issue:</p>
+                      <div class="code-block">
+                        <code>Closes #${{ github.event.issue.number }}</code>
+                        <code>Fixes #${{ github.event.issue.number }}</code>
+                        <code>Resolves #${{ github.event.issue.number }}</code>
+                      </div>
+                      <p style="margin-top:6px;">Open as a <strong>Draft PR</strong> — do not mark ready for review yet.</p>
+                    </div>
+                  </div>
+
+                  <!-- Step 6 -->
+                  <div class="step">
+                    <div class="step-num">6</div>
+                    <div class="step-body">
+                      <strong>Ensure CI passes before marking Ready for Review</strong>
+                      <p>
+                        Wait for all CI checks to pass on your Draft PR.
+                        Once everything is green, click <strong>"Ready for Review"</strong>
+                        and a maintainer will be automatically notified.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="note">
+                    💡 <strong>Tip:</strong> If CI fails, push a fix to your branch — it will re-trigger automatically.
+                    Never mark a PR as Ready for Review with failing checks.
+                  </div>
+
+                  <div class="cta">
+                    <a href="${{ env.REPO_URL }}/issues/${{ github.event.issue.number }}" class="btn">
+                      View Issue #${{ github.event.issue.number }}
+                    </a>
+                  </div>
+
+                </div>
+
+                <div class="footer">
+                  You're receiving this because you were assigned to an issue in
+                  <strong>${{ github.repository }}</strong>.<br>
+                  Questions? Drop a comment on the issue or reach out on Discord.
+                </div>
+
+              </div>
+            </body>
+            </html>
+
+      # ── Step 3b: Fallback — post onboarding steps as issue comment ──────────
+      - name: Post onboarding steps as comment (email fallback)
+        if: |
+          steps.interest.outputs.expressed_interest == 'true' &&
+          steps.email.outputs.email_found == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assignee    = context.payload.assignee.login;
+            const issueNumber = context.payload.issue.number;
+            const issueTitle  = context.payload.issue.title;
+            const repoUrl     = '${{ env.REPO_URL }}';
+
+            const body = `
+            ## 📬 Hey @${assignee} — here are your contribution steps!
+
+            > We couldn't find a public email on your GitHub profile, so we're sharing your onboarding steps here instead.
+            > To receive these by email in the future, add a public email at [github.com/settings/profile](https://github.com/settings/profile).
+
+            ---
+
+            ### 📋 Standardized Contribution Steps
+
+            **Issue assigned:** #${issueNumber} — ${issueTitle}
+
+            ---
+
+            **Step 1 — Fork the repository**
+            \`\`\`bash
+            gh repo fork ${{ github.repository }} --clone
+            cd wsem-app
+            \`\`\`
+
+            **Step 2 — Create a branch following the \`feature/**\` convention**
+            \`\`\`bash
+            git checkout -b feature/issue-${issueNumber}-short-description
+            \`\`\`
+            > Example: \`feature/issue-${issueNumber}-fix-login-button\`
+
+            **Step 3 — Create an initial empty commit referencing the issue**
+            \`\`\`bash
+            git commit --allow-empty -m "feat: start work on #${issueNumber} - ${issueTitle}"
+            \`\`\`
+
+            **Step 4 — Push your branch**
+            \`\`\`bash
+            git push origin feature/issue-${issueNumber}-short-description
+            \`\`\`
+
+            **Step 5 — Open a Draft PR with proper issue linking**
+
+            Use one of these keywords in your PR description:
+            \`\`\`
+            Closes #${issueNumber}
+            Fixes #${issueNumber}
+            Resolves #${issueNumber}
+            \`\`\`
+            > Open as a **Draft PR** — do not mark ready for review yet.
+
+            **Step 6 — Ensure CI passes before marking Ready for Review**
+
+            Wait for all CI checks to pass. Once everything is green, click **"Ready for Review"** — a maintainer will be automatically notified.
+
+            ---
+
+            > 💡 **Tip:** If CI fails, push a fix to your branch — it will re-trigger automatically. Never mark a PR as Ready for Review with failing checks.
+
+            Good luck! 🚀 Drop a comment here if you have any questions.
+            `;
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: issueNumber,
+              body,
+            });
+            core.info(`Posted onboarding steps as fallback comment on issue #${issueNumber}`);
+
+      # ── Step 4: Always post confirmation comment on the issue ───────────────
+      - name: Post assignment confirmation comment
+        if: steps.interest.outputs.expressed_interest == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assignee   = context.payload.assignee.login;
+            const emailFound = '${{ steps.email.outputs.email_found }}' === 'true';
+            const delivery   = emailFound
+              ? `📧 We've sent the contribution steps to your email.`
+              : `📝 We've posted the contribution steps in a comment below since no public email was found on your profile.`;
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: `✅ **@${assignee} has been assigned to this issue.**\n\n${delivery}\n\nWhen your Draft PR is open and CI passes, click **"Ready for Review"** and a maintainer will be notified automatically.`,
+            });
+
+      # ── Step 5: Log skip if no interest comment found ───────────────────────
+      - name: Log skip — no interest comment
+        if: steps.interest.outputs.expressed_interest == 'false'
+        run: |
+          echo "⚠️ Assignee did not express interest via comment — onboarding email skipped."
+          echo "Assignee: ${{ github.event.assignee.login }}"
+          echo "Issue: #${{ github.event.issue.number }}"
